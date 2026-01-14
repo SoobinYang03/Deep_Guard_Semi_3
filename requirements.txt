@@ -1,0 +1,25 @@
+# FastAPI 관련
+fastapi>=0.115.0
+uvicorn[standard]>=0.32.0
+python-multipart>=0.0.12
+python-dotenv>=1.0.0
+
+# MongoDB 관련
+motor>=3.6.0
+beanie>=1.27.0
+pydantic>=2.10.0
+pydantic-settings>=2.7.0
+
+# HTTP 클라이언트
+aiohttp>=3.11.0
+httpx>=0.28.0
+requests>=2.32.0
+
+# DeepGuard 스캐너 의존성
+python-nmap==0.7.1
+shodan==1.31.0
+selenium==4.16.0
+webdriver-manager==4.0.1
+
+# 유틸리티
+python-dateutil==2.8.2
