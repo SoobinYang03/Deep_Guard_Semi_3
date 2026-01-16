@@ -28,7 +28,6 @@ backend/
 │       ├── scan_router.py   # 포트 스캔 API (비동기/동기)
 │       └── report_router.py # 리포트 조회 및 통계 API
 ├── .env                     # 환경 변수 (MongoDB URL, 보안 키 등)
-├── .gitignore
 ├── docker-compose.yml       # MongoDB + Mongo Express
 ├── requirements.txt         # Python 패키지 의존성
 └── README.md
@@ -53,6 +52,8 @@ backend/
 - Python 3.10+
 - Docker & Docker Compose
 - nmap 설치 및 PATH 등록
+- Nuclei 설치 및 PATH 등록
+- etc...
 
 ### 2️⃣ 가상환경 설정 (프로젝트 루트에서)
 
@@ -197,8 +198,6 @@ curl "http://localhost:8000/api/v1/scan/14e225dc-2112-40ef-b162-af96daa34612"
 nmap --version
 ```
 
-**SYN 스캔은 관리자 권한 필요**
-
 ### 2. API 키 설정
 `deepguard_portscanner.py`에서 본인의 API 키로 변경:
 ```python
@@ -206,7 +205,7 @@ SHODAN_API_KEY = "your-shodan-key"
 VT_API_KEY = "your-virustotal-key"
 ```
 
-### 3. Nuclei 설치 (선택)
+### 3. Nuclei 설치
 ```bash
 # Go 설치 후
 go install -v github.com/projectdiscovery/nuclei/v2/cmd/nuclei@latest
