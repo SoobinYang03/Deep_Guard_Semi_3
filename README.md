@@ -1,7 +1,4 @@
 
-  # User Dashboard
-
-  This is a code bundle for User Dashboard. The original project is available at https://www.figma.com/design/fLmtkoEnXKnxaQiCnl2xDN/User-Dashboard.
 
   ## Running the code
 
