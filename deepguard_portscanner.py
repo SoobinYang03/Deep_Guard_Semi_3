@@ -1,17 +1,14 @@
 import socket
 import json
 from concurrent.futures import ThreadPoolExecutor
-
 import nmap
 import os
-import time
 import shodan
 import asyncio
 import aiohttp
 import logging
-from selenium import webdriver
-from selenium.webdriver.chrome.service import Service
-from selenium.webdriver.chrome.options import Options
+from Wappalyzer import Wappalyzer, WebPage
+from scapy.all import AsyncSniffer, wrpcap
 from webdriver_manager.chrome import ChromeDriverManager
 from datetime import datetime
 
@@ -101,7 +98,7 @@ class SecurityAnalyzer:
 
     def __init__(self):
         os.environ['WDM_LOG_LEVEL'] = '0'
-        logger.info("셀레니움 드라이버 준비중")
+        logger.info("6조 Deepguard 세미프로젝트 3차.")
         self.driver_path = ChromeDriverManager().install()
 
     #분석API1. Nuclei도구를 사용, CVE데이터 매칭
@@ -208,53 +205,91 @@ class SecurityAnalyzer:
             logger.error(f"바이러스토탈 조회 실패: {e}")
             return {"reputation": "error", "malicious_hits": 0}
 
-    #분석API5. 웹서비스의 스크린샷을 수집해서 시각적 증거를 확보함.
-    def selenium_evidence(self, target_ip, port, service_name, is_web=False):
-        #분석3-1 웹서비스가 아니면 그대로 종료
-        if not is_web:
-            return {"is_web": False, "screenshot_path": None}
-
-        #분석3-2 증거저장위치. evidence/포트번호/서비스명_시간.png 형식으로 저장.
-        base_dir = "evidence"
-        save_dir = os.path.join(base_dir, str(port))
-        #분석3-3 폴더명이 없으면 생성하기
-        if not os.path.exists(save_dir): os.makedirs(save_dir)
-
-        #분석3-4 셀레니움 설정. 헤드리스모드를 사용해 별도의 창을 실행하지 않고 진행.
-        chrome_options = Options()
-        chrome_options.add_argument("--headless")
-        chrome_options.add_argument("--no-sandbox")
-        chrome_options.add_argument("--disable-dev-shm-usage")
-
-        driver = None
+#증거 클래스
+class EvidenceCollector:
+    def __init__(self):
+        # Wappalyzer 엔진 초기화 (최신 기술 정의 로드)
         try:
-            #분석3-5. 드라이버 실행
-            service = Service(self.driver_path)
-            driver = webdriver.Chrome(service=service, options=chrome_options)
-
-            #분석3-6. 타겟ip와 포트번호를 사용해 접속
-            url = f"http://{target_ip}:{port}"
-            driver.set_page_load_timeout(5)
-            driver.get(url)
-            time.sleep(2)
-
-            #분석3-7. 파일명 설정해서 저장.
-            timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
-            file_name = f"{service_name}_{timestamp}.png"
-            file_path = os.path.join(save_dir, file_name)
-            driver.save_screenshot(file_path)
-
-            return {
-                "is_web": True,
-                "screenshot_path": file_path
-            }
-
+            self.wappalyzer = Wappalyzer.latest()
+            logger.info("Wappalyzer 엔진 로드 완료")
         except Exception as e:
-            logger.error(f"Selenium 캡쳐 실패 ({port}): {e}")
-            return {"is_web": True, "screenshot_path": "Capture Failed"}
+            logger.error(f"Wappalyzer 초기화 실패: {e}")
+            self.wappalyzer = None
 
+        self.sniffer_dict = {}  # 포트별 스니퍼 관리를 위한 딕셔너리
+
+    def save_evidence_dir(self, port):
+        path = os.path.join("evidence", str(port))
+        if not os.path.exists(path):
+            os.makedirs(path)
+        return path
+
+    def collect_web_metadata(self, target_ip, port):
+        save_dir = self.save_evidence_dir(port)
+        url = f"http://{target_ip}:{port}"
+
+        try:
+            webpage = WebPage.new_from_url(url, timeout=5)
+            tech_data = self.wappalyzer.analyze_with_versions(webpage)
+
+            file_path = os.path.join(save_dir, "tech_stack.json")
+            with open(file_path, "w", encoding="utf-8") as f:
+                json.dump(tech_data, f, indent=4, ensure_ascii=False)
+
+            logger.info(f"웹 메타데이터 저장 완료: {file_path}")
+            return tech_data
+        except Exception as e:
+            logger.warning(f"웹 메타데이터 수집 실패 ({port}): {e}")
+            return None
+
+    def start_packet_capture(self, target_ip, port):
+        try:
+            filter_str = f"host {target_ip} and port {port}"
+            sniffer = AsyncSniffer(filter=filter_str)
+            sniffer.start()
+            self.sniffer_dict[port] = sniffer
+            logger.info(f"포트 {port} 패킷 캡처 시작")
+        except Exception as e:
+            logger.error(f"패킷 캡처 시작 실패: {e}")
+
+    def stop_packet_capture(self, port):
+        sniffer = self.sniffer_dict.get(port)
+        if not sniffer:
+            return None
+
+        try:
+            sniffer.stop()
+            packets = sniffer.results
+            if packets:
+                save_dir = self.save_evidence_dir(port)
+                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                file_path = os.path.join(save_dir, f"traffic_{timestamp}.pcap")
+                wrpcap(file_path, packets)
+                logger.info(f"PCAP 저장 완료: {file_path}")
+                return file_path
+        except Exception as e:
+            logger.error(f"PCAP 저장 실패: {e}")
         finally:
-            if driver: driver.quit()
+            if port in self.sniffer_dict:
+                del self.sniffer_dict[port]
+        return None
+
+    def save_banner_log(self, port, identified_data):
+        save_dir = self.save_evidence_dir(port)
+        file_path = os.path.join(save_dir, "banner_info.txt")
+
+        try:
+            with open(file_path, "w", encoding="utf-8") as f:
+                f.write(f"Timestamp: {datetime.now()}\n")
+                f.write(f"Port: {port}\n")
+                f.write(f"Product: {identified_data.get('product', 'unknown')}\n")
+                f.write(f"Version: {identified_data.get('version', 'unknown')}\n")
+                f.write(f"Raw Banner: {identified_data.get('banner', '')}\n")
+            return file_path
+        except Exception as e:
+            logger.error(f"배너 로그 저장 실패: {e}")
+            return None
+
 
 #스키마 클래스
 class ReportSchema:
@@ -297,9 +332,10 @@ class ReportSchema:
                 "remediation": "최신 보안패치 적용을 권장합니다."
             },
             "evidence": {
-                "is_web": evidence['is_web'],
-                "screenshot_path": evidence['screenshot_path'],
-                "raw_log": identified_data.get('banner', f"Port {port} connection active")
+                "is_web": evidence.get('is_web', False),
+                "tech_stack": evidence.get('tech_stack'),
+                "pcap_path": evidence.get('pcap_path'),
+                "raw_log": identified_data.get('banner', f"Port {port} active")
             }
         }
 
@@ -309,9 +345,11 @@ class DeepguardController:
         self.scanner = PortScanner()
         self.identifier = ServiceIdentifier()
         self.analyzer = SecurityAnalyzer()
+        self.evidence = EvidenceCollector()
         self.executor = ThreadPoolExecutor(max_workers=10)
         self.shodan_api = shodan.Shodan(self.analyzer.SHODAN_API_KEY)
         self.browser_semaphore = asyncio.Semaphore(2)
+
 
     async def process_target_port(self, target_ip, port):
 
@@ -326,8 +364,9 @@ class DeepguardController:
         if status == "open":
             logger.info(f"발견한 포트 번호{port} 분석 시작")
 
-            async with aiohttp.ClientSession() as session:
+            await loop.run_in_executor(None, self.evidence.start_packet_capture, target_ip, port)
 
+            async with aiohttp.ClientSession() as session:
                 # 식별클래스 호출
                 identified_data = await loop.run_in_executor(None, self.identifier.port_identification, target_ip, port)
                 # 분석클래스 호출
@@ -342,13 +381,27 @@ class DeepguardController:
                 reputation = await self.analyzer.match_virustotal(session, target_ip)
                 # 동적 웹서비스 판별, 증거수집
                 is_web = "http" in identified_data['product'].lower() or port in [80, 443]
-                async with self.browser_semaphore:
-                    evid = await loop.run_in_executor(
-                        None, self.analyzer.selenium_evidence,
-                        target_ip, port, identified_data['product'], is_web
-                    )
+                tech_stack = None
+
+                if is_web:
+                    # 웹 서비스일 경우 Wappalyzer 메타데이터 수집
+                    tech_stack = await loop.run_in_executor(None, self.evidence.collect_web_metadata, target_ip, port)
+                else:
+                    # 웹이 아닐 경우 배너 로그 별도 저장
+                    await loop.run_in_executor(None, self.evidence.save_banner_log, port, identified_data)
+
+                # 분석 종료 후 패킷 캡처 중지 및 PCAP 저장
+                pcap_path = await loop.run_in_executor(None, self.evidence.stop_packet_capture, port)
+
+                #증거데이터 1차 정리
+                evidence = {
+                    "is_web": is_web,
+                    "tech_stack": tech_stack,
+                    "pcap_path": pcap_path
+                }
+
                 # 스키마클래스 호출
-                report = await ReportSchema.json_result(session, target_ip, "SYN_SCAN", port, identified_data, vulns, intel, reputation, evid)
+                report = await ReportSchema.json_result(session, target_ip, "SYN_SCAN", port, identified_data, vulns, intel, reputation, evidence)
                 return report
         return None
 
