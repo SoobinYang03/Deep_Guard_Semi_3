@@ -217,13 +217,13 @@ class EvidenceCollector:
             self.wappalyzer = None
 
         self.sniffer_dict = {}  # 포트별 스니퍼 관리를 위한 딕셔너리
-
+    #증거 저장 위치
     def save_evidence_dir(self, port):
         path = os.path.join("evidence", str(port))
         if not os.path.exists(path):
             os.makedirs(path)
         return path
-
+    #웹서비스일경우, 메타데이터 수집
     def collect_web_metadata(self, target_ip, port):
         save_dir = self.save_evidence_dir(port)
         url = f"http://{target_ip}:{port}"
@@ -241,7 +241,7 @@ class EvidenceCollector:
         except Exception as e:
             logger.warning(f"웹 메타데이터 수집 실패 ({port}): {e}")
             return None
-
+    #웹서비스가 아닐 경우, 우선 TCP캡쳐
     def start_packet_capture(self, target_ip, port):
         try:
             filter_str = f"host {target_ip} and port {port}"
@@ -273,7 +273,7 @@ class EvidenceCollector:
             if port in self.sniffer_dict:
                 del self.sniffer_dict[port]
         return None
-
+    #TCP캡쳐에서 배너 로그를 추출
     def save_banner_log(self, port, identified_data):
         save_dir = self.save_evidence_dir(port)
         file_path = os.path.join(save_dir, "banner_info.txt")
@@ -456,3 +456,4 @@ if __name__ == "__main__":
     final_output = asyncio.run(controller.main_controller("127.0.0.1"))
     formatted_output = json.dumps(final_output, indent=4, ensure_ascii=False)
     print(f"최종 리포트 요약.\n{formatted_output}\n")
+
