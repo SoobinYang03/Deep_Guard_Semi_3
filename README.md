@@ -1,4 +1,4 @@
-<<<<<<< HEAD
+HEAD
 # Deep_Guard_Semi_3
 =======
 
@@ -9,4 +9,4 @@
 
   Run `npm run dev` to start the development server.
   
->>>>>>> origin/feature/scanner-connect
+origin/feature/scanner-connect
