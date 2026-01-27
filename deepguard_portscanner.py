@@ -7,6 +7,11 @@ import shodan
 import asyncio
 import aiohttp
 import logging
+import ssl
+import subprocess
+import psutil
+import xml.etree.ElementTree as ET
+from google import genai
 from Wappalyzer import Wappalyzer, WebPage
 from scapy.all import AsyncSniffer, wrpcap
 from webdriver_manager.chrome import ChromeDriverManager
@@ -76,20 +81,44 @@ class ServiceIdentifier:
     #식별API1. Nmap기반. 서비스 및 OS 식별
     def port_identification(self, target_ip, port):
 
+        identified = {"version": "unknown", "product": "unknown", "banner": ""}
+
         try:
             self.nm.scan(target_ip, str(port), arguments = '-sV')
-            if target_ip not in self.nm.all_hosts() or 'tcp' not in self.nm[target_ip]:
-                return {"version": "unknown", "product": "unknown", "banner": ""}
-
-            service_info = self.nm[target_ip]['tcp'][port]
-            return {
-                "version": service_info.get('version', 'unknown'),
-                "product": service_info.get('product', 'unknown'),
-                "banner": service_info.get('extrainfo', '')
-            }
+            if target_ip in self.nm.all_hosts() and 'tcp' in self.nm[target_ip]:
+                service_info = self.nm[target_ip]['tcp'][port]
+                identified["product"] = service_info.get('product', 'unknown')
+                identified["version"] = service_info.get('version', 'unknown')
+                identified["banner"] = service_info.get('extrainfo', '')
         except Exception as e:
-            logger.warning(f"Nmap 식별 실패 ({port}): {e}")
-            return {"version": "식별 실패", "product": "unknown"}
+            logger.warning(f"Nmap 식별 실패 ({port}): {e}. 로컬 프로세스를 추적합니다.")
+
+        if (identified["product"] == "unknown" or not identified["product"]) and \
+                target_ip in ["127.0.0.1", "localhost"]:
+
+            proc_info = self.get_local_process_info(port)
+            if proc_info:
+                identified["product"] = proc_info["name"]
+                identified["version"] = f"PID: {proc_info['pid']}"
+                identified["banner"] = f"Path: {proc_info['path']}"
+
+        return identified
+
+    def get_local_process_info(self, port):
+
+        try:
+            for conn in psutil.net_connections(kind='inet'):
+                if conn.laddr.port == port and conn.status == 'LISTEN':
+                    process = psutil.Process(conn.pid)
+                    return {
+                        "name": process.name(),
+                        "pid": conn.pid,
+                        "path": process.exe()
+                    }
+        except Exception:
+            return None
+
+
 
 #분석 클래스
 class SecurityAnalyzer:
@@ -217,13 +246,13 @@ class EvidenceCollector:
             self.wappalyzer = None
 
         self.sniffer_dict = {}  # 포트별 스니퍼 관리를 위한 딕셔너리
-    #증거 저장 위치
+
     def save_evidence_dir(self, port):
         path = os.path.join("evidence", str(port))
         if not os.path.exists(path):
             os.makedirs(path)
         return path
-    #웹서비스일경우, 메타데이터 수집
+
     def collect_web_metadata(self, target_ip, port):
         save_dir = self.save_evidence_dir(port)
         url = f"http://{target_ip}:{port}"
@@ -241,7 +270,7 @@ class EvidenceCollector:
         except Exception as e:
             logger.warning(f"웹 메타데이터 수집 실패 ({port}): {e}")
             return None
-    #웹서비스가 아닐 경우, 우선 TCP캡쳐
+
     def start_packet_capture(self, target_ip, port):
         try:
             filter_str = f"host {target_ip} and port {port}"
@@ -273,7 +302,7 @@ class EvidenceCollector:
             if port in self.sniffer_dict:
                 del self.sniffer_dict[port]
         return None
-    #TCP캡쳐에서 배너 로그를 추출
+
     def save_banner_log(self, port, identified_data):
         save_dir = self.save_evidence_dir(port)
         file_path = os.path.join(save_dir, "banner_info.txt")
@@ -290,11 +319,95 @@ class EvidenceCollector:
             logger.error(f"배너 로그 저장 실패: {e}")
             return None
 
+    def fetch_banner_advanced(self, target_ip, port):
+        save_dir = self.save_evidence_dir(port)
+        banner_info = {"product": "unknown", "version": "unknown", "raw": ""}
+
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(5)
+
+            context = ssl.create_default_context()
+            context.check_hostname = False
+            context.verify_mode = ssl.CERT_NONE
+
+            conn = sock.connect_ex((target_ip, port))
+            if conn == 0:
+                probe = f"GET / HTTP/1.1\r\nHost: {target_ip}\r\nConnection: close\r\n\r\n"
+                sock.sendall(probe.encode())
+
+                raw_data = sock.recv(2048).decode(errors='ignore')
+                banner_info["raw"] = raw_data
+
+                for line in raw_data.split('\n'):
+                    if line.lower().startswith("server:"):
+                        banner_info["product"] = line.split(":", 1)[1].strip()
+                        break
+        except Exception as e:
+            logger.warning(f"고급 배너 수집 실패 ({port}): {e}")
+        finally:
+            sock.close()
+        return banner_info
+
+
+#솔루션 클래스
+class SolutionGenerator:
+    def __init__(self, api_key):
+
+        self.client = genai.Client(api_key=api_key)
+
+    async def ai_remediation(self, port, identified_data, vulns):
+        if not vulns:
+            return "탐지된 취약점이 없으므로 조치가 필요하지 않습니다."
+
+        vuln_text = ""
+        for v in vulns[:5]:
+            vuln_text += f"- {v['id']} ({v['severity']}): {v['description']}\n"
+
+        prompt = f"""
+        당신은 기업 보안 사고 대응팀(CERT) 전문가입니다. 다음 정보를 분석하여 보안 권고안을 작성하세요.
+
+        [분석 데이터]
+        - 포트: {port}
+        - 식별된 서비스: {identified_data.get('product')}
+        - 상세 정보: {identified_data.get('banner')}
+        - 탐지된 취약점:
+        {vuln_text}
+
+        [작성 가이드라인]
+        1. 버전 업데이트 : 현재 버전 정보를 표시하고, 해당 소프트웨어를 해결할 수 있는 최신 버전 정보와 업데이트 방법을 제시하세요.
+        2. 임시 조치: 즉시 패치가 불가능할 경우, 설정 변경(config)이나 방화벽 등을 통한 완화 방법을 제시하세요.
+        3. 모든 답변은 한국어로, IT 실무자가 바로 복사해서 쓸 수 있는 명령어(CLI)를 포함하여 상세히 기술하세요.
+        """
+
+        try:
+            response = await self.client.aio.models.generate_content(
+                model='gemini-2.0-flash',
+                contents=prompt
+            )
+            return response.text
+        except Exception as e:
+            logger.error(f"AI API 호출 에러: {e}")
+            return "AI 솔루션 생성에 실패했습니다. 관리자에게 문의하세요."
+
 
 #스키마 클래스
 class ReportSchema:
+
+    #기업 타겟 리스트 필터링
+    try:
+        with open("target_cve.json", "r", encoding="utf-8") as f:
+            target_data = json.load(f)
+            TARGET_LIST = target_data.get("enterprise_targets", [])
+            TARGET_IDS = {t["id"] for t in TARGET_LIST}
+    except Exception as e:
+        print(f"Target list load error: {e}")
+        TARGET_IDS = set()
+
     @staticmethod
-    async def json_result(session, target_ip, scan_mode, port, identified_data, vulns, intel, reputation, evidence):
+    async def json_result(session, target_ip, scan_mode, port, identified_data, vulns, intel, reputation, evidence, ai_remedy):
+
+        identified_data['product'] = identified_data.get('product') or "Unidentified Service"
 
         if vulns:
             tasks = [SecurityAnalyzer.get_epss_score(session, v['id']) for v in vulns]
@@ -306,6 +419,13 @@ class ReportSchema:
             max_epss = max(epss_scores) if epss_scores else 0.0
         else:
             max_epss = 0.0
+
+        is_enterprise_target = False
+        if vulns:
+            for v in vulns:
+                if v['id'] in ReportSchema.TARGET_IDS:
+                    is_enterprise_target = True
+                    break
 
         cvss_base = 7.5 if vulns else 0.0
         final_score = (cvss_base * 0.6) + (max_epss * 10 * 0.4)
@@ -321,7 +441,8 @@ class ReportSchema:
                 "protocol": "TCP",
                 "service_name": identified_data.get('product', 'unknown'),
                 "risk_score": round(final_score, 2),
-                "risk_level": "위험" if final_score > 6.0 else "안전"
+                "risk_level": "위험" if final_score > 6.0 else "안전",
+                "enterprise_target": is_enterprise_target
             },
             "details": {
                 "service_version": f"{identified_data['product']}{identified_data['version']}",
@@ -329,7 +450,7 @@ class ReportSchema:
                 "cve_list": vulns,
                 "shodan_data": intel,
                 "reputation_data": reputation,
-                "remediation": "최신 보안패치 적용을 권장합니다."
+                "remediation": ai_remedy
             },
             "evidence": {
                 "is_web": evidence.get('is_web', False),
@@ -341,13 +462,15 @@ class ReportSchema:
 
 #조작 클래스
 class DeepguardController:
-    def __init__(self):
+    def __init__(self, gemini_key):
         self.scanner = PortScanner()
         self.identifier = ServiceIdentifier()
         self.analyzer = SecurityAnalyzer()
         self.evidence = EvidenceCollector()
+        self.solution = SolutionGenerator(api_key=gemini_key)
         self.executor = ThreadPoolExecutor(max_workers=10)
         self.shodan_api = shodan.Shodan(self.analyzer.SHODAN_API_KEY)
+        self.ai_semaphore = asyncio.Semaphore(1)
         self.browser_semaphore = asyncio.Semaphore(2)
 
 
@@ -369,6 +492,7 @@ class DeepguardController:
             async with aiohttp.ClientSession() as session:
                 # 식별클래스 호출
                 identified_data = await loop.run_in_executor(None, self.identifier.port_identification, target_ip, port)
+
                 # 분석클래스 호출
                 # 내부 취약점
                 vulns = await self.analyzer.port_vulnerability(target_ip, port, identified_data['product'])
@@ -382,6 +506,14 @@ class DeepguardController:
                 # 동적 웹서비스 판별, 증거수집
                 is_web = "http" in identified_data['product'].lower() or port in [80, 443]
                 tech_stack = None
+
+                ai_remedy = "취약점이 발견되지 않아 추가 솔루션이 필요하지 않습니다."
+
+                if vulns and len(vulns) > 0 and vulns[0]['id'] != 'info-service':
+                    async with self.ai_semaphore:
+                        logger.info(f"포트 {port}: 고위험 취약점 발견. AI 정밀 분석 시작...")
+                        ai_remedy = await self.solution.ai_remediation(port, identified_data, vulns)
+                        await asyncio.sleep(4)
 
                 if is_web:
                     # 웹 서비스일 경우 Wappalyzer 메타데이터 수집
@@ -397,12 +529,28 @@ class DeepguardController:
                 evidence = {
                     "is_web": is_web,
                     "tech_stack": tech_stack,
-                    "pcap_path": pcap_path
+                    "pcap_path": pcap_path,
+                    "raw_log": identified_data.get('banner','')
                 }
 
                 # 스키마클래스 호출
-                report = await ReportSchema.json_result(session, target_ip, "SYN_SCAN", port, identified_data, vulns, intel, reputation, evidence)
+                report = await ReportSchema.json_result(session, target_ip, "SYN_SCAN", port, identified_data, vulns, intel, reputation, evidence, ai_remedy)
                 return report
+        return None
+
+    def get_local_process_info(self, port):
+        try:
+            import psutil
+            for conn in psutil.net_connections(kind='inet'):
+                if conn.laddr.port == port and conn.status == 'LISTEN':
+                    process = psutil.Process(conn.pid)
+                    return {
+                        "name": process.name(),
+                        "pid": conn.pid,
+                        "path": process.exe()
+                    }
+        except Exception as e:
+            logger.debug(f"Local process info extraction failed: {e}")
         return None
 
     async def main_controller(self, target_ip, port_range=None):
@@ -452,8 +600,9 @@ class DeepguardController:
 
 
 if __name__ == "__main__":
-    controller = DeepguardController()
+    my_gemini_key = "AIzaSyAsWyF2BFo8p8jm5A_YzNkPcvSxReUHkag"
+
+    controller = DeepguardController(gemini_key=my_gemini_key)
     final_output = asyncio.run(controller.main_controller("127.0.0.1"))
     formatted_output = json.dumps(final_output, indent=4, ensure_ascii=False)
     print(f"최종 리포트 요약.\n{formatted_output}\n")
-
